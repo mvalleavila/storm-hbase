@@ -22,23 +22,24 @@ import backtype.storm.task.TopologyContext;
 import backtype.storm.topology.OutputFieldsDeclarer;
 import backtype.storm.topology.base.BaseRichBolt;
 import backtype.storm.tuple.Tuple;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.client.HTable;
 import org.apache.hadoop.hbase.client.Increment;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.RetriesExhaustedWithDetailsException;
-import org.apache.hadoop.hbase.security.UserProvider;
 import org.apache.storm.hbase.bolt.mapper.HBaseMapper;
 import org.apache.storm.hbase.common.ColumnList;
-import org.apache.storm.hbase.security.HBaseSecurityUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
-import java.security.PrivilegedExceptionAction;
+import java.util.Iterator;
 import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Properties;
 
 /**
  * Basic bolt for writing to HBase.
@@ -56,48 +57,64 @@ public class HBaseBolt  extends BaseRichBolt {
     private String tableName;
     private HBaseMapper mapper;
     boolean writeToWAL = true;
-    private String configKey;
-
+    private Properties properties = null;
+    
     public HBaseBolt(String tableName, HBaseMapper mapper){
         this.tableName = tableName;
         this.mapper = mapper;
     }
-
+    
+    public HBaseBolt(String tableName, HBaseMapper mapper, Properties properties){
+        this.tableName = tableName;
+        this.mapper = mapper;
+        this.properties = properties;
+    }
+    
     public HBaseBolt writeToWAL(boolean writeToWAL){
         this.writeToWAL = writeToWAL;
         return this;
     }
 
-    public HBaseBolt withConfigKey(String configKey){
-        this.configKey = configKey;
-        return this;
-    }
-
     @Override
     public void prepare(Map map, TopologyContext topologyContext, OutputCollector collector) {
-        this.collector = collector;
-        final Configuration hbConfig = HBaseConfiguration.create();
-
-        Map<String, Object> conf = (Map<String, Object>)map.get(this.configKey);
-        if(conf == null){
-            throw new IllegalArgumentException("HBase configuration not found using key '" + this.configKey + "'");
+        
+        String hbaseClusterDistributed;
+        String hbaseRootdir;
+        String hbaseZookeeperQuorum;
+    	
+    	this.collector = collector;
+        Configuration hbConfig;
+       
+        hbConfig = HBaseConfiguration.create();
+        
+        if (properties != null)
+        {
+        	hbaseClusterDistributed = properties.getProperty("hbase.cluster.distribute", "true");
+            hbaseRootdir = properties.getProperty("hbase.rootdir", "hdfs://localhost:8020/hbase");
+            hbaseZookeeperQuorum = properties.getProperty("hbase.zookeeper.quorum", "localhost");
+        	hbConfig.set("hbase.cluster.distribute", hbaseClusterDistributed);
+        	hbConfig.set("hbase.rootdir", hbaseRootdir);
+        	hbConfig.set("hbase.zookeeper.quorum", hbaseZookeeperQuorum);
         }
-        if(conf.get("hbase.rootdir") == null){
-            LOG.warn("No 'hbase.rootdir' value found in configuration! Using HBase defaults.");
+        
+        Iterator<Entry<String,String>> it = hbConfig.iterator();
+        Entry<String,String> en;
+        
+        while (it.hasNext())
+        {
+        	en = it.next();
+        	System.out.println(en.getKey()+" "+en.getValue());        	
         }
-        for(String key : conf.keySet()){
-            hbConfig.set(key, String.valueOf(map.get(key)));
+        
+        String hbRoot = (String)map.get("hbase.rootdir");
+        if(hbRoot != null){
+            LOG.info("Using hbase.rootdir={}", hbRoot);
+            hbConfig.set("hbase.rootdir", hbRoot);
         }
 
         try{
-            UserProvider provider = HBaseSecurityUtil.login(map, hbConfig);
-            this.table = provider.getCurrent().getUGI().doAs(new PrivilegedExceptionAction<HTable>() {
-                @Override
-                public HTable run() throws IOException {
-                    return new HTable(hbConfig, tableName);
-                }
-            });
-        } catch(Exception e){
+            this.table = new HTable(hbConfig, this.tableName);
+        } catch(IOException e){
             throw new RuntimeException("HBase bolt preparation failed: " + e.getMessage(), e);
         }
     }
